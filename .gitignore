@@ -16,6 +16,9 @@ call_audio/
 # Logs
 *.log
 
+# Vercel
+.vercel/
+
 # OS
 .DS_Store
 Thumbs.db
