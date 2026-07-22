@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="ka">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>ცოცხალი სუბტიტრები</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; flex-direction: column;
+    font-family: system-ui, "Segoe UI", sans-serif;
+    background: #0b1220; color: #f8fafc;
+  }
+  header {
+    padding: 14px 18px; display: flex; align-items: center; justify-content: space-between;
+    border-bottom: 1px solid #1e293b;
+  }
+  header h1 { margin: 0; font-size: 16px; font-weight: 600; color: #cbd5e1; }
+  #dot { width: 12px; height: 12px; border-radius: 50%; background: #475569; }
+  #dot.live { background: #22c55e; animation: pulse 1.2s infinite; }
+  #dot.thinking { background: #f59e0b; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  #captions {
+    flex: 1; overflow-y: auto; padding: 24px 22px 10px;
+    display: flex; flex-direction: column; justify-content: flex-end; gap: 16px;
+  }
+  .line {
+    font-size: clamp(26px, 5.5vw, 46px); line-height: 1.35; font-weight: 600;
+    color: #e2e8f0;
+  }
+  .who {
+    display: inline-block; font-size: 0.5em; font-weight: 700; vertical-align: middle;
+    padding: 2px 10px; border-radius: 20px; margin-right: 12px;
+    background: var(--c, #475569); color: #05121f;
+  }
+  .line:last-child { filter: brightness(1.15); }   /* newest phrase pops */
+  #hint { color: #64748b; font-size: 18px; text-align: center; margin: auto; }
+
+  footer { padding: 18px 16px 30px; text-align: center; border-top: 1px solid #1e293b; }
+  #status { font-size: 15px; color: #94a3b8; min-height: 20px; margin-bottom: 12px; }
+  #btn {
+    padding: 16px 40px; border-radius: 40px; border: none; cursor: pointer;
+    background: #22c55e; color: #05240f; font-size: 20px; font-weight: 700;
+  }
+  #btn.on { background: #dc2626; color: #fff; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>ცოცხალი სუბტიტრები</h1>
+    <div id="dot" title="status"></div>
+  </header>
+
+  <div id="captions"><div id="hint">დააჭირეთ „დაწყება"-ს და მიუშვირეთ ტელეფონი მოსაუბრეს</div></div>
+
+  <footer>
+    <div id="status">გამორთულია</div>
+    <button id="btn">დაწყება</button>
+  </footer>
+
+<script>
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+const dot = document.getElementById('dot');
+const capEl = document.getElementById('captions');
+const hint = document.getElementById('hint');
+
+const sid = localStorage.capSid || (localStorage.capSid = Math.random().toString(36).slice(2));
+const SPEAKER_COLORS = ['#22c55e', '#38bdf8', '#f59e0b', '#f472b6', '#a78bfa', '#facc15'];
+const speakerColor = {};
+
+let ctx, source, processor, stream, running = false;
+let speaking = false, seg = [], lookback = [], silenceStart = 0, segStart = 0;
+let noiseFloor = 0.005;
+let queue = [], working = false;
+
+const SILENCE_MS = 700;   // pause that ends a phrase
+const MIN_MS = 350;       // ignore blips shorter than this
+const MAX_MS = 12000;     // force-cut very long phrases
+
+btn.onclick = () => running ? stop() : start();
+
+async function start() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) { setStatus('მიკროფონზე წვდომა ვერ მოხერხდა'); return; }
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  source = ctx.createMediaStreamSource(stream);
+  processor = ctx.createScriptProcessor(4096, 1, 1);
+  processor.onaudioprocess = onAudio;
+  source.connect(processor);
+  processor.connect(ctx.destination);
+  running = true;
+  btn.textContent = 'გაჩერება'; btn.classList.add('on');
+  dot.classList.add('live');
+  setStatus('ვუსმენ...');
+  if (hint) hint.remove();
+}
+
+function stop() {
+  running = false;
+  try { processor.disconnect(); source.disconnect(); stream.getTracks().forEach(t => t.stop()); ctx.close(); } catch (e) {}
+  speaking = false; seg = []; lookback = [];
+  btn.textContent = 'დაწყება'; btn.classList.remove('on');
+  dot.classList.remove('live', 'thinking');
+  setStatus('გამორთულია');
+}
+
+function onAudio(e) {
+  const buf = e.inputBuffer.getChannelData(0);
+  let sum = 0; for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+  const rms = Math.sqrt(sum / buf.length);
+  const now = performance.now();
+
+  // Rolling lookback so we don't clip the start of a phrase.
+  lookback.push(new Float32Array(buf));
+  if (lookback.length > 3) lookback.shift();
+
+  // Adaptive threshold: track the room's noise floor while it's quiet.
+  const thresh = Math.max(0.01, noiseFloor * 4);
+  if (!speaking && rms < thresh) noiseFloor = noiseFloor * 0.95 + rms * 0.05;
+
+  if (rms > thresh) {
+    if (!speaking) { speaking = true; segStart = now; seg = lookback.slice(); }
+    else seg.push(new Float32Array(buf));
+    silenceStart = 0;
+  } else if (speaking) {
+    seg.push(new Float32Array(buf));
+    if (!silenceStart) silenceStart = now;
+    if (now - silenceStart > SILENCE_MS) endPhrase(now);
+  }
+  if (speaking && now - segStart > MAX_MS) endPhrase(now);
+}
+
+function endPhrase(now) {
+  const dur = now - segStart;
+  const frames = seg;
+  speaking = false; seg = []; silenceStart = 0;
+  if (dur > MIN_MS) { queue.push(frames); if (queue.length > 6) queue.shift(); pump(); }
+}
+
+// Send phrases one at a time (never overlap) — keeps us under the API rate limit.
+async function pump() {
+  if (working || !queue.length) return;
+  working = true; dot.classList.add('thinking'); setStatus('ვშიფრავ...');
+  const wav = encodeWAV(queue.shift(), ctx.sampleRate);
+  const fd = new FormData();
+  fd.append('audio', wav, 'phrase.wav');
+  fd.append('sid', sid);
+  try {
+    const r = await fetch('/caption', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.text) addLine(j.speaker, j.text);
+  } catch (e) { /* drop this phrase, keep listening */ }
+  working = false;
+  if (queue.length) pump();
+  else if (running) { dot.classList.remove('thinking'); setStatus('ვუსმენ...'); }
+}
+
+function colorFor(speaker) {
+  if (!speaker) return null;
+  if (!(speaker in speakerColor)) {
+    speakerColor[speaker] = SPEAKER_COLORS[Object.keys(speakerColor).length % SPEAKER_COLORS.length];
+  }
+  return speakerColor[speaker];
+}
+
+function addLine(speaker, text) {
+  const d = document.createElement('div');
+  d.className = 'line';
+  const c = colorFor(speaker);
+  if (speaker) {
+    const chip = document.createElement('span');
+    chip.className = 'who';
+    chip.style.setProperty('--c', c);
+    chip.textContent = speaker;
+    d.appendChild(chip);
+  }
+  d.appendChild(document.createTextNode(text));
+  capEl.appendChild(d);
+  while (capEl.children.length > 12) capEl.removeChild(capEl.firstChild);
+  capEl.scrollTop = capEl.scrollHeight;
+}
+
+function setStatus(t) { statusEl.textContent = t; }
+
+// --- 16-bit PCM WAV encoder (Gemini accepts audio/wav) ---
+function encodeWAV(frames, sampleRate) {
+  let length = frames.reduce((a, c) => a + c.length, 0);
+  const data = new Float32Array(length);
+  let off = 0;
+  for (const c of frames) { data.set(c, off); off += c.length; }
+  const buffer = new ArrayBuffer(44 + data.length * 2);
+  const view = new DataView(buffer);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); view.setUint32(4, 36 + data.length * 2, true); w(8, 'WAVE');
+  w(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  w(36, 'data'); view.setUint32(40, data.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < data.length; i++, o += 2) {
+    let s = Math.max(-1, Math.min(1, data[i]));
+    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([view], { type: 'audio/wav' });
+}
+</script>
+</body>
+</html>

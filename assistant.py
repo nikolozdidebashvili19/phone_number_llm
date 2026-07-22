@@ -20,6 +20,9 @@ except ImportError:
 
 KEY = os.environ["GEMINI_API_KEY"]
 MODEL = "gemini-3.6-flash"        # smartest model on this key's free tier (thinking + audio)
+# Live captioning fires a request per phrase, so it needs a high requests-per-minute
+# limit more than deep reasoning. The "lite" model has a much higher free-tier RPM.
+TRANSCRIBE_MODEL = "gemini-flash-lite-latest"
 VOICE = "ka-GE-EkaNeural"         # female; ka-GE-GiorgiNeural for male
 
 # Base persona/rules, shared by every channel.
@@ -75,3 +78,37 @@ def synthesize(text, path=None, rate="-10%"):
     path = path or f"{uuid.uuid4().hex}.mp3"
     asyncio.run(edge_tts.Communicate(text, VOICE, rate=rate).save(path))
     return path
+
+
+TRANSCRIBE_SYSTEM = """შენ ხარ ქართული მეტყველების ზუსტი ტრანსკრიბატორი.
+დააბრუნე მხოლოდ ის ტექსტი, რაც აუდიოში ითქვა, ქართულ ენაზე.
+არ დაამატო ახსნა, კომენტარი, ემოჯი ან ბრჭყალები.
+თუ აუდიოში მეტყველება არ ისმის ან გაუგებარია, დააბრუნე ცარიელი პასუხი."""
+
+
+def transcribe(audio_b64, mime="audio/wav"):
+    """Transcribe a short Georgian audio clip to text (for live captioning).
+    Returns "" when there's no clear speech."""
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{TRANSCRIBE_MODEL}:generateContent?key={KEY}",
+        json={
+            "system_instruction": {"parts": [{"text": TRANSCRIBE_SYSTEM}]},
+            "contents": [{"role": "user", "parts": [
+                {"inline_data": {"mime_type": mime, "data": audio_b64}},
+                {"text": "ჩაწერე ტექსტად ის, რაც ითქვა."},
+            ]}],
+            # Transcription needs no reasoning — keep it fast and literal.
+            "generationConfig": {"maxOutputTokens": 400, "temperature": 0.0},
+        },
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+    try:
+        text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    except (KeyError, IndexError):
+        return ""
+    # Guard against the model narrating "no speech" instead of staying silent.
+    if text in ("", "-", "—") or text.startswith("(") or text.startswith("["):
+        return ""
+    return text
