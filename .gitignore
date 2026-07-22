@@ -1,0 +1,17 @@
+# Secrets — never commit real tokens
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Generated audio
+*.mp3
+!assets/*.mp3
+
+# OS
+.DS_Store
+Thumbs.db
