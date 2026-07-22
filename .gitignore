@@ -11,6 +11,10 @@ venv/
 # Generated audio
 *.mp3
 !assets/*.mp3
+call_audio/
+
+# Logs
+*.log
 
 # OS
 .DS_Store

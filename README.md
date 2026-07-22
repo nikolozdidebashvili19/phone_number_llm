@@ -1,58 +1,92 @@
-# Georgian Voice Assistant — Telegram Bot
+# Georgian Voice Assistant
 
-A voice assistant for elderly and disabled users, in Georgian, inside Telegram.
-Hold the mic button, speak → the bot understands and replies with a Georgian voice
-message. Text works too. The chat itself is your live transcript.
+A voice assistant for elderly and disabled users, in Georgian. Front-ends share
+one brain and voice:
 
-**Pipeline:** voice message → Gemini (audio in, Georgian text out) → `edge-tts`
-(`ka-GE-EkaNeural`) → MP3 → `sendVoice`. No telephony, no webhook, no tunnel,
-no API key for TTS.
+- **🌐 Browser call** (`web.py`) — open a web page, tap, speak Georgian, hear the AI reply.
+  Call-like, free, no phone number, works from any browser (incl. phones). **Recommended.**
+- **💬 Telegram bot** (`bot.py`) — send a voice message or text, get a Georgian voice reply.
+- **📞 Phone line** (`run_phone.py`) — call a real SignalWire number. Note: SignalWire's
+  free trial geo-blocks Georgian (+995) numbers, so this needs a paid upgrade to use from Georgia.
+
+**Brain:** Gemini (`gemini-3.6-flash`) — takes audio in, answers in Georgian.
+**Voice:** `edge-tts` with `ka-GE-EkaNeural` — free, no key, natural Georgian speech.
+Both live in [assistant.py](assistant.py) so the persona stays in one place.
+
+## Files
+
+| File | Role |
+|---|---|
+| `assistant.py` | Shared Gemini brain + edge-tts voice |
+| `call.py` | SignalWire phone webhook (Flask) |
+| `run_phone.py` | One-command launcher: tunnel + auto-configure number + server |
+| `bot.py` | Telegram bot |
 
 ## Setup
 
-1. **Bot token** — Telegram → [@BotFather](https://t.me/BotFather) → `/newbot` → copy the token.
-2. **Gemini key** — free at [Google AI Studio](https://aistudio.google.com/apikey) (no credit card).
-3. **Install deps:**
-   ```bash
-   pip install -U -r requirements.txt
-   ```
-4. **Smoke test the Georgian voice** (do this first — it's the one hard constraint):
-   ```bash
-   python -m edge_tts --voice ka-GE-EkaNeural --text "გამარჯობა, როგორ დაგეხმაროთ?" --write-media t.mp3
-   ```
-   If `t.mp3` plays, you're set.
-
-## Run
-
-PowerShell (Windows):
-```powershell
-$env:TELEGRAM_BOT_TOKEN="123456:ABC..."
-$env:GEMINI_API_KEY="AIza..."
-python bot.py
-```
-
-bash (macOS/Linux/Git Bash):
 ```bash
-export TELEGRAM_BOT_TOKEN=123456:ABC...
-export GEMINI_API_KEY=AIza...
-python bot.py
+pip install -U -r requirements.txt
+cp .env.example .env      # then fill in the values
 ```
 
-Then open your bot in Telegram and send `/start`.
+Fill `.env`:
+- `GEMINI_API_KEY` — free at [Google AI Studio](https://aistudio.google.com/apikey)
+- `TELEGRAM_BOT_TOKEN` — from [@BotFather](https://t.me/BotFather) (only for the Telegram bot)
+- `SIGNALWIRE_SPACE_URL`, `SIGNALWIRE_PROJECT_ID`, `SIGNALWIRE_API_TOKEN` — SignalWire Space → API (only for the phone line)
+- `SIGNALWIRE_PHONE_NUMBER` — optional; blank means "configure all my numbers"
+
+## Run the browser call app (recommended)
+
+```bash
+python web.py
+```
+Open **http://localhost:5000** in Chrome/Edge on this laptop, allow the mic, tap the
+button, speak Georgian, tap again to send. The AI answers in the `ka-GE` voice and the
+Georgian text scrolls on screen (your live transcript for a demo).
+
+**To use it on your phone:** the mic needs a secure (https) page, so expose it with a
+free tunnel and open the printed https URL on the phone (same page, works over any wifi):
+```bash
+cloudflared tunnel --url http://localhost:5000
+```
+
+## Run the phone line
+
+Install the tunnel once (then open a **new** terminal so it's on PATH):
+```bash
+winget install --id Cloudflare.cloudflared
+```
+
+Then just:
+```bash
+python run_phone.py
+```
+
+That single command starts a cloudflared tunnel, points your SignalWire number's voice
+webhook at it automatically, and runs the server. Call the number and speak Georgian
+after the beep.
+
+> **Trial Space:** add your own phone as a **Verified Caller ID** in SignalWire first,
+> or incoming calls will be blocked.
+
+### How a call works
+```
+call in  → /incoming : play greeting, then <Record>
+you talk → /handle   : download recording → Gemini (Georgian) → edge-tts → <Play> → <Record> again
+```
+Understanding uses Gemini on the recorded audio (not phone STT), so Georgian stays sharp.
+Phone answers are kept short (2–3 sentences) so callers aren't stuck in long silences.
+Expect ~5–12s per turn (silence detection + download + Gemini + TTS).
+
+## Run the Telegram bot
+```bash
+python bot.py
+```
+Send `/start`, then a voice message or text. Telegram answers are detailed/long
+(different from the phone's brief style).
 
 ## Notes
-
-- `edge_tts` must be called as `python -m edge_tts` if the `edge-tts` script isn't on PATH.
-- Conversation memory is per-chat, last 8 turns (`h[-8:]`). Say **„გამიმეორე"** to test it.
-- Voice clips longer than `MAX_VOICE_SECONDS` (45s) get a polite "please send shorter" reply.
-- Gemini free tier is ~10–15 req/min — plenty for a demo, don't let the whole team hammer it at once.
-- Run `pip install -U edge-tts` on demo morning; Microsoft occasionally rotates tokens.
-- If Telegram is blocked on venue wifi, use a phone hotspot — long polling works over anything.
-
-## Config knobs (top of `bot.py`)
-
-| Constant | Default | Meaning |
-|---|---|---|
-| `MODEL` | `gemini-2.5-flash` | Gemini model id (check AI Studio for current free id) |
-| `VOICE` | `ka-GE-EkaNeural` | TTS voice (`ka-GE-GiorgiNeural` for male) |
-| `MAX_VOICE_SECONDS` | `45` | Reject clips longer than this |
+- `edge-tts` smoke test: `python -m edge_tts --voice ka-GE-EkaNeural --text "გამარჯობა" --write-media t.mp3`
+- Pro Gemini models return `limit: 0` on this key's free tier — stay on `gemini-3.6-flash`.
+- Generated call audio lands in `call_audio/` and is auto-deleted after 5 minutes.
+- Never commit `.env`. If a token was ever exposed, rotate it (BotFather `/revoke`; SignalWire → new token).

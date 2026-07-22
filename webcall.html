@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="ka">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>ხმოვანი დამხმარე</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  body {
+    margin: 0; min-height: 100vh; display: flex; flex-direction: column;
+    font-family: system-ui, "Segoe UI", sans-serif;
+    background: linear-gradient(160deg, #0f172a, #1e293b);
+    color: #e2e8f0;
+  }
+  header { padding: 20px; text-align: center; }
+  header h1 { margin: 0; font-size: 20px; font-weight: 600; }
+  header p { margin: 6px 0 0; font-size: 13px; color: #94a3b8; }
+
+  #log {
+    flex: 1; overflow-y: auto; padding: 12px 16px;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .bubble {
+    max-width: 80%; padding: 10px 14px; border-radius: 16px;
+    font-size: 16px; line-height: 1.45; white-space: pre-wrap;
+  }
+  .ai { align-self: flex-start; background: #334155; border-bottom-left-radius: 4px; }
+  .me { align-self: flex-end; background: #2563eb; color: #fff; border-bottom-right-radius: 4px; font-style: italic; opacity: .85; }
+
+  footer { padding: 18px 16px 28px; text-align: center; }
+  #status { font-size: 14px; color: #94a3b8; min-height: 20px; margin-bottom: 14px; }
+  #btn {
+    width: 96px; height: 96px; border-radius: 50%; border: none; cursor: pointer;
+    background: #2563eb; color: #fff; font-size: 40px; transition: transform .1s, background .2s;
+    box-shadow: 0 8px 24px rgba(37,99,235,.45);
+  }
+  #btn:active { transform: scale(.94); }
+  #btn.rec { background: #dc2626; animation: pulse 1.2s infinite; box-shadow: 0 8px 24px rgba(220,38,38,.5); }
+  #btn:disabled { background: #475569; box-shadow: none; cursor: default; }
+  @keyframes pulse { 0%,100% { transform: scale(1);} 50% { transform: scale(1.06);} }
+  #reset { margin-top: 16px; background: none; border: none; color: #64748b; font-size: 13px; cursor: pointer; text-decoration: underline; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>ხმოვანი დამხმარე</h1>
+    <p>დააჭირეთ ღილაკს, ილაპარაკეთ, შემდეგ კვლავ დააჭირეთ</p>
+  </header>
+
+  <div id="log"></div>
+
+  <footer>
+    <div id="status">დააჭირეთ სალაპარაკოდ</div>
+    <button id="btn" aria-label="talk">🎙️</button>
+    <div><button id="reset">ახალი საუბარი</button></div>
+  </footer>
+
+<script>
+const sid = localStorage.sid || (localStorage.sid = Math.random().toString(36).slice(2));
+const btn = document.getElementById('btn');
+const statusEl = document.getElementById('status');
+const log = document.getElementById('log');
+
+let ctx, source, processor, stream, chunks = [], recording = false, busy = false;
+
+function setStatus(t) { statusEl.textContent = t; }
+function bubble(text, cls) {
+  const d = document.createElement('div');
+  d.className = 'bubble ' + cls;
+  d.textContent = text;
+  log.appendChild(d);
+  log.scrollTop = log.scrollHeight;
+}
+
+btn.onclick = async () => {
+  if (busy) return;
+  if (!recording) { await startRec(); }
+  else { await stopAndSend(); }
+};
+
+async function startRec() {
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    setStatus('მიკროფონზე წვდომა ვერ მოხერხდა');
+    return;
+  }
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  source = ctx.createMediaStreamSource(stream);
+  processor = ctx.createScriptProcessor(4096, 1, 1);
+  chunks = [];
+  processor.onaudioprocess = e => chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  source.connect(processor);
+  processor.connect(ctx.destination);
+  recording = true;
+  btn.classList.add('rec');
+  btn.textContent = '⏹️';
+  setStatus('გისმენთ...');
+}
+
+async function stopAndSend() {
+  recording = false;
+  btn.classList.remove('rec');
+  const sampleRate = ctx.sampleRate;
+  processor.disconnect(); source.disconnect();
+  stream.getTracks().forEach(t => t.stop());
+  const wav = encodeWAV(chunks, sampleRate);
+  ctx.close();
+
+  busy = true;
+  btn.disabled = true;
+  btn.textContent = '💭';
+  setStatus('ვფიქრობ...');
+
+  const fd = new FormData();
+  fd.append('audio', wav, 'turn.wav');
+  fd.append('sid', sid);
+  try {
+    const r = await fetch('/talk', { method: 'POST', body: fd });
+    const j = await r.json();
+    if (j.text) {
+      bubble(j.text, 'ai');
+      setStatus('ვპასუხობ...');
+      const audio = new Audio('data:audio/mp3;base64,' + j.audio);
+      audio.onended = ready;
+      audio.onerror = ready;
+      await audio.play().catch(ready);
+    } else { ready(); }
+  } catch (e) {
+    setStatus('შეცდომა. სცადეთ თავიდან.');
+    ready();
+  }
+}
+
+function ready() {
+  busy = false;
+  btn.disabled = false;
+  btn.textContent = '🎙️';
+  setStatus('დააჭირეთ სალაპარაკოდ');
+}
+
+document.getElementById('reset').onclick = async () => {
+  const fd = new FormData(); fd.append('sid', sid);
+  await fetch('/reset', { method: 'POST', body: fd });
+  log.innerHTML = '';
+  setStatus('ახალი საუბარი დაიწყო');
+};
+
+// --- Minimal 16-bit PCM WAV encoder (Gemini accepts audio/wav) ---
+function encodeWAV(frames, sampleRate) {
+  let length = frames.reduce((a, c) => a + c.length, 0);
+  const data = new Float32Array(length);
+  let off = 0;
+  for (const c of frames) { data.set(c, off); off += c.length; }
+
+  const buffer = new ArrayBuffer(44 + data.length * 2);
+  const view = new DataView(buffer);
+  const w = (o, s) => { for (let i = 0; i < s.length; i++) view.setUint8(o + i, s.charCodeAt(i)); };
+  w(0, 'RIFF'); view.setUint32(4, 36 + data.length * 2, true); w(8, 'WAVE');
+  w(12, 'fmt '); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true); view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  w(36, 'data'); view.setUint32(40, data.length * 2, true);
+  let o = 44;
+  for (let i = 0; i < data.length; i++, o += 2) {
+    let s = Math.max(-1, Math.min(1, data[i]));
+    view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+  }
+  return new Blob([view], { type: 'audio/wav' });
+}
+</script>
+</body>
+</html>
