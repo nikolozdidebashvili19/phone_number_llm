@@ -1,0 +1,15 @@
+# Render Blueprint for the Georgian browser-call app (web.py).
+# In Render: New + -> Blueprint -> connect this repo -> it reads this file.
+# Then set GEMINI_API_KEY in the dashboard (marked sync:false so it isn't in git).
+services:
+  - type: web
+    name: georgian-voice-assistant
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    # One worker so the in-memory conversation history is shared; threads allow
+    # several callers at once. Long timeout because a turn (Gemini + TTS) can take ~10s.
+    startCommand: gunicorn web:app --bind 0.0.0.0:$PORT --workers 1 --threads 8 --timeout 120
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
